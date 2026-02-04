@@ -1,0 +1,317 @@
+import asyncio
+import aiohttp
+import os
+import hashlib
+from datetime import datetime
+from telethon import events
+import re
+
+class SafeDeepLTranslator:
+    """Безопасный переводчик с проверкой API ключа"""
+    
+    def __init__(self, client):
+        self.client = client
+        
+        # Безопасное получение API ключа
+        self.api_key = self.get_api_key_safely()
+        
+        # Настройки
+        self.settings = {
+            'auto_translate': True,
+            'target_language': 'EN',
+            'source_language': 'RU',
+            'show_original': True,
+            'cache_enabled': True,
+            'max_text_length': 4000,
+        }
+        
+        # Кэш переводов для экономии запросов
+        self.translation_cache = {}
+        
+        # Статистика
+        self.stats = {
+            'translations_done': 0,
+            'characters_translated': 0,
+            'cache_hits': 0,
+            'last_translation': None
+        }
+        
+        self.setup_handlers()
+    
+    def get_api_key_safely(self):
+        """Безопасное получение API ключа с валидацией"""
+        api_key = os.getenv('DEEPL_API_KEY')
+        
+        if not api_key:
+            print("⚠️ ВНИМАНИЕ: DEEPL_API_KEY не установлен!")
+            print("ℹ️ Установите его командой: heroku config:set DEEPL_API_KEY='ваш_ключ'")
+            return None
+        
+        # Проверяем формат ключа (примерная валидация)
+        if not api_key.startswith('deepL_auth_key_'):
+            print("⚠️ ВНИМАНИЕ: API ключ выглядит некорректно")
+            print("ℹ️ Ключ должен начинаться с 'deepL_auth_key_'")
+        
+        # Скрываем ключ в логах
+        masked_key = api_key[:8] + '...' + api_key[-4:] if len(api_key) > 12 else '***'
+        print(f"✅ DeepL API ключ загружен: {masked_key}")
+        
+        return api_key
+    
+    def setup_handlers(self):
+        """Настройка обработчиков сообщений"""
+        
+        @self.client.on(events.NewMessage(outgoing=True))
+        async def translation_handler(event):
+            """Перевод исходящих сообщений"""
+            if not self.settings['auto_translate']:
+                return
+            
+            if not self.api_key:
+                await event.reply("❌ DeepL API ключ не настроен!")
+                return
+            
+            # Получаем текст сообщения
+            message = event.message.message
+            if not message or len(message.strip()) == 0:
+                return
+            
+            # Проверяем язык (только русский -> английский)
+            if self.is_russian_text(message):
+                await self.translate_and_send(event, message)
+        
+        @self.client.on(events.NewMessage(pattern='!translate (.*)'))
+        async def manual_translation_handler(event):
+            """Ручной перевод по команде"""
+            if not self.api_key:
+                await event.reply("❌ DeepL API ключ не настроен!")
+                return
+            
+            text_to_translate = event.pattern_match.group(1)
+            if text_to_translate:
+                translated = await self.translate_text(text_to_translate)
+                if translated:
+                    await event.reply(f"🇷🇺 → 🇺🇸\n{translated}")
+                else:
+                    await event.reply("❌ Ошибка перевода")
+        
+        @self.client.on(events.NewMessage(pattern='!translator (on|off|status)'))
+        async def settings_handler(event):
+            """Управление настройками переводчика"""
+            command = event.pattern_match.group(1).lower()
+            
+            if command == 'on':
+                self.settings['auto_translate'] = True
+                await event.reply("✅ Переводчик включен")
+            
+            elif command == 'off':
+                self.settings['auto_translate'] = False
+                await event.reply("✅ Переводчик выключен")
+            
+            elif command == 'status':
+                status = "🟢 ВКЛ" if self.settings['auto_translate'] else "🔴 ВЫКЛ"
+                stats_text = self.get_stats_text()
+                await event.reply(f"📊 Переводчик: {status}\n\n{stats_text}")
+    
+    def is_russian_text(self, text):
+        """Определяет, является ли текст русским"""
+        # Простая проверка по кириллическим символам
+        russian_chars = sum(1 for char in text if 'а' <= char.lower() <= 'я' or char in 'ёЁ')
+        total_chars = sum(1 for char in text if char.isalpha())
+        
+        if total_chars == 0:
+            return False
+        
+        russian_ratio = russian_chars / total_chars
+        return russian_ratio > 0.5  # Если больше 50% русских букв
+    
+    def get_cache_key(self, text):
+        """Создает ключ для кэша"""
+        return hashlib.md5(f"{text}_{self.settings['target_language']}".encode()).hexdigest()
+    
+    async def translate_text(self, text):
+        """Основная функция перевода через DeepL API"""
+        
+        # Проверка длины текста
+        if len(text) > self.settings['max_text_length']:
+            text = text[:self.settings['max_text_length']] + "..."
+        
+        # Проверка кэша
+        cache_key = self.get_cache_key(text)
+        if self.settings['cache_enabled'] and cache_key in self.translation_cache:
+            self.stats['cache_hits'] += 1
+            return self.translation_cache[cache_key]
+        
+        try:
+            # Подготовка запроса к DeepL API
+            url = "https://api-free.deepl.com/v2/translate"
+            
+            params = {
+                'auth_key': self.api_key,
+                'text': text,
+                'target_lang': self.settings['target_language'],
+                'source_lang': self.settings['source_language'],
+                'preserve_formatting': '1',
+                'split_sentences': '1',
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, data=params) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        
+                        if 'translations' in data and len(data['translations']) > 0:
+                            translated_text = data['translations'][0]['text']
+                            
+                            # Сохраняем в кэш
+                            if self.settings['cache_enabled']:
+                                self.translation_cache[cache_key] = translated_text
+                                # Ограничиваем размер кэша
+                                if len(self.translation_cache) > 1000:
+                                    self.translation_cache.pop(next(iter(self.translation_cache)))
+                            
+                            # Обновляем статистику
+                            self.stats['translations_done'] += 1
+                            self.stats['characters_translated'] += len(text)
+                            self.stats['last_translation'] = datetime.now()
+                            
+                            return translated_text
+                    
+                    # Обработка ошибок
+                    error_text = await response.text()
+                    print(f"DeepL API Error {response.status}: {error_text}")
+                    return None
+                    
+        except Exception as e:
+            print(f"Translation error: {e}")
+            return None
+    
+    async def translate_and_send(self, event, original_text):
+        """Переводит текст и отправляет результат"""
+        try:
+            # Переводим текст
+            translated = await self.translate_text(original_text)
+            
+            if not translated:
+                return
+            
+            # Форматируем ответ
+            if self.settings['show_original']:
+                response = (
+                    f"**🇷🇺 Оригинал:**\n"
+                    f"{original_text}\n\n"
+                    f"**🇺🇸 Перевод:**\n"
+                    f"{translated}\n\n"
+                    f"_🤖 Переведено через DeepL_"
+                )
+            else:
+                response = translated
+            
+            # Отправляем перевод
+            await event.reply(response, parse_mode='md')
+            
+            # Можно удалить оригинальное сообщение и отправить перевод
+            # await event.delete()
+            # await event.respond(translated)
+            
+        except Exception as e:
+            print(f"Error in translate_and_send: {e}")
+    
+    def get_stats_text(self):
+        """Возвращает текст статистики"""
+        last_trans = self.stats['last_translation']
+        last_time = last_trans.strftime("%H:%M:%S") if last_trans else "никогда"
+        
+        return (
+            f"📈 **Статистика переводов:**\n"
+            f"• Всего переводов: {self.stats['translations_done']}\n"
+            f"• Символов переведено: {self.stats['characters_translated']:,}\n"
+            f"• Попаданий в кэш: {self.stats['cache_hits']}\n"
+            f"• Последний перевод: {last_time}\n"
+            f"• Размер кэша: {len(self.translation_cache)}"
+        )
+    
+    def get_help_text(self):
+        """Возвращает текст помощи"""
+        return (
+            "**🤖 DeepL Переводчик для Telegram**\n\n"
+            "**Команды:**\n"
+            "• Просто пишите на русском - автоматически переведет на английский\n"
+            "• `!translate [текст]` - ручной перевод\n"
+            "• `!translator on/off` - включить/выключить авто-перевод\n"
+            "• `!translator status` - статистика\n\n"
+            "**Настройки (измените в коде):**\n"
+            "• auto_translate: Автоматический перевод\n"
+            "• target_language: Язык перевода (EN, DE, FR, etc.)\n"
+            "• show_original: Показывать оригинальный текст\n"
+            "• cache_enabled: Кэширование переводов\n"
+            "• max_text_length: Макс. длина текста (4000 символов)"
+        )
+
+# ==================== ИНСТРУКЦИЯ ПО ИСПОЛЬЗОВАНИЮ ====================
+
+"""
+УСТАНОВКА НА HEROKU:
+
+1. Получите DeepL API ключ: https://www.deepl.com/pro-api
+
+2. Установите ключ в Heroku:
+   heroku config:set DEEPL_API_KEY="ваш_ключ_тут" -a ваше-приложение
+
+3. Добавьте плагин в main.py:
+
+from deepl_translator import SafeDeepLTranslator
+
+async def main():
+    client = TelegramClient(...)
+    await client.start()
+    
+    # Инициализация переводчика
+    translator = SafeDeepLTranslator(client)
+    
+    print("🤖 Переводчик DeepL запущен!")
+    await client.run_until_disconnected()
+
+4. Требуемые зависимости (requirements.txt):
+   telethon>=1.24.0
+   aiohttp>=3.8.0
+
+5. Отправьте команду !translator status для проверки
+6. Напишите что-то на русском - получите перевод на английский!
+
+РАБОЧИЕ ЯЗЫКИ DEEPL:
+RU -> EN, DE, FR, ES, PT, IT, NL, PL, JA, ZH, etc.
+
+БЕСПЛАТНЫЙ ЛИМИТ:
+500,000 символов в месяц (Free план)
+"""
+
+# Тестовый пример использования
+async def test_translation():
+    """Тестовая функция для проверки"""
+    
+    # Замените на свои данные
+    TEST_API_KEY = os.getenv('DEEPL_API_KEY')
+    
+    if not TEST_API_KEY:
+        print("❌ Установите DEEPL_API_KEY для теста")
+        return
+    
+    # Имитация перевода
+    test_text = "Привет, как дела? Сегодня отличная погода!"
+    
+    translator = SafeDeepLTranslator(None)  # None вместо client для теста
+    translator.api_key = TEST_API_KEY
+    
+    translated = await translator.translate_text(test_text)
+    
+    if translated:
+        print(f"✅ Тест пройден!")
+        print(f"Оригинал: {test_text}")
+        print(f"Перевод: {translated}")
+    else:
+        print("❌ Тест не пройден. Проверьте API ключ")
+
+if __name__ == "__main__":
+    # Запуск теста если файл запущен напрямую
+    asyncio.run(test_translation())
