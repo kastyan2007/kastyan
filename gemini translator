@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Gemini Translator для Telegram
+Gemini Translator для Telegram - Heroku совместимая версия
 Автоматический перевод русских сообщений на английский через Google Gemini API
 """
 
@@ -8,6 +8,7 @@ import os
 import asyncio
 import hashlib
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List
@@ -16,64 +17,74 @@ from telethon import TelegramClient, events
 from telethon.tl import types
 import logging
 
-# Настройка логирования
+# Настройка логирования для Heroku
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
 )
 logger = logging.getLogger(__name__)
 
 class GeminiTranslator:
     """
     Переводчик на основе Google Gemini AI
-    Поддерживает перевод, определение языка, контекстные переводы
+    Heroku-совместимая версия с исправлениями
     """
     
     def __init__(self, client: TelegramClient, gemini_api_key: Optional[str] = None):
         """
-        Инициализация переводчика
+        Инициализация переводчика для Heroku
         
         Args:
             client: Telethon клиент
-            gemini_api_key: Ключ API Google Gemini (или из переменных окружения)
+            gemini_api_key: Ключ API Google Gemini
         """
         self.client = client
+        
+        # Получаем API ключ из переменных окружения Heroku
         self.api_key = gemini_api_key or os.getenv('GEMINI_API_KEY')
         
         if not self.api_key:
+            # Пробуем альтернативные имена переменных
+            self.api_key = os.getenv('GOOGLE_AI_API_KEY') or os.getenv('GOOGLE_API_KEY')
+        
+        if not self.api_key:
             logger.error("GEMINI_API_KEY не найден в переменных окружения!")
+            logger.error("Установите в Heroku: GEMINI_API_KEY='ваш_ключ_здесь'")
             raise ValueError(
                 "GEMINI_API_KEY не указан. "
-                "Установите: export GEMINI_API_KEY='ваш_ключ' "
-                "или в .env файле"
+                "Установите в конфигурации Heroku или в .env файле"
             )
         
         # Проверяем ключ
         self.validate_api_key()
         
-        # Настройки по умолчанию
+        # Настройки по умолчанию для Heroku
         self.settings = {
             'auto_translate': True,
             'target_language': 'английский',
             'source_language': 'русский',
             'show_original': True,
-            'show_transliteration': False,  # Показывать транслитерацию
-            'context_aware': True,  # Учитывать контекст
-            'formal_tone': False,  # Формальный тон перевода
+            'show_transliteration': False,
+            'context_aware': True,
+            'formal_tone': False,
             'preserve_formatting': True,
             'max_length': 4000,
             'cache_enabled': True,
-            'cache_size': 1000,
-            'rate_limit': 15,  # запросов в минуту
+            'cache_size': 500,  # Уменьшено для Heroku
+            'rate_limit': 10,  # Уменьшено для Heroku
             'ignore_commands': True,
             'ignore_links': False,
             'smart_language_detection': True,
-            'reply_in_thread': False,  # Ответ в треде
+            'reply_in_thread': False,
+            'use_web_preview': False,  # Отключено для стабильности
         }
         
-        # Инициализация
+        # Инициализация API
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/models"
-        self.model = "gemini-pro"  # или "gemini-pro-vision" для изображений
+        self.model = "gemini-1.5-pro-latest"  # Актуальная модель
         
         # Кэш переводов
         self.translation_cache: Dict[str, str] = {}
@@ -96,17 +107,17 @@ class GeminiTranslator:
         # Настройка обработчиков
         self.setup_handlers()
         
-        logger.info(f"Gemini Translator инициализирован. Модель: {self.model}")
+        logger.info(f"Gemini Translator инициализирован для Heroku. Модель: {self.model}")
     
     def validate_api_key(self) -> bool:
         """Валидация API ключа"""
         try:
             # Проверяем формат ключа Gemini
             if not self.api_key.startswith('AIza'):
-                logger.warning("Ключ API не похож на валидный Gemini ключ")
-                return False
+                logger.warning("Ключ API может быть невалидным для Gemini")
+                # Не прерываем выполнение, только предупреждаем
             
-            # Маскируем ключ для логов
+            # Маскируем ключ для безопасности
             masked_key = self.api_key[:8] + '...' + self.api_key[-4:] if len(self.api_key) > 12 else '***'
             logger.info(f"Gemini API ключ загружен: {masked_key}")
             return True
@@ -137,7 +148,7 @@ class GeminiTranslator:
             if self.should_translate(message_text):
                 await self.handle_translation(event, message_text)
         
-        # Обработчик для входящих сообщений (перевод на русский)
+        # Обработчик для входящих сообщений
         @self.client.on(events.NewMessage(incoming=True))
         async def incoming_message_handler(event):
             """Обработка входящих сообщений (опционально)"""
@@ -148,48 +159,51 @@ class GeminiTranslator:
                     pass
         
         # Команда для ручного перевода
-        @self.client.on(events.NewMessage(pattern=r'^!tr(?:anslate)?\s+(.+)$', outgoing=True))
+        @self.client.on(events.NewMessage(pattern=r'^!tr(?:anslate)?\s+(.+)$'))
         async def manual_translate_handler(event):
-            """Ручной перевод по команде !tr или !translate"""
+            """Ручной перевод по команде"""
             text_to_translate = event.pattern_match.group(1).strip()
             if text_to_translate:
                 await self.manual_translation(event, text_to_translate)
         
         # Команда для настроек
-        @self.client.on(events.NewMessage(pattern=r'^!transsettings\s*(.+)?$', outgoing=True))
+        @self.client.on(events.NewMessage(pattern=r'^!transsettings\s*(.+)?$'))
         async def settings_handler(event):
-            """Управление настройками переводчика"""
+            """Управление настройками"""
             args = event.pattern_match.group(1)
             await self.handle_settings(event, args)
         
         # Команда для статистики
-        @self.client.on(events.NewMessage(pattern='^!trstats$', outgoing=True))
+        @self.client.on(events.NewMessage(pattern='^!trstats$'))
         async def stats_handler(event):
             """Показать статистику"""
             await self.show_stats(event)
         
         # Команда для помощи
-        @self.client.on(events.NewMessage(pattern='^!trhelp$', outgoing=True))
+        @self.client.on(events.NewMessage(pattern='^!trhelp$'))
         async def help_handler(event):
             """Показать помощь"""
             await self.show_help(event)
+        
+        # Команда для перезагрузки
+        @self.client.on(events.NewMessage(pattern='^!trreload$'))
+        async def reload_handler(event):
+            """Перезагрузка переводчика"""
+            await event.reply("🔄 Перезагрузка переводчика...")
+            self.translation_cache.clear()
+            self.language_cache.clear()
+            await event.reply("✅ Кэш очищен, переводчик перезагружен")
         
         logger.info("Обработчики событий настроены")
     
     def should_translate(self, text: str) -> bool:
         """
         Определяет, нужно ли переводить текст
-        
-        Args:
-            text: Текст для проверки
-        
-        Returns:
-            bool: True если нужно переводить
         """
         if not text or len(text.strip()) < 2:
             return False
         
-        # Проверяем кэш определения языка
+        # Проверяем кэш
         text_hash = hashlib.md5(text.encode()).hexdigest()
         if text_hash in self.language_cache:
             return self.language_cache[text_hash] == 'ru'
@@ -199,22 +213,15 @@ class GeminiTranslator:
         self.language_cache[text_hash] = detected_lang
         
         # Ограничиваем размер кэша
-        if len(self.language_cache) > 500:
+        if len(self.language_cache) > 300:
             self.language_cache.pop(next(iter(self.language_cache)))
         
         return detected_lang == 'ru'
     
     def detect_language_simple(self, text: str) -> str:
         """
-        Простое определение языка (русский/английский/другой)
-        
-        Args:
-            text: Текст для анализа
-        
-        Returns:
-            str: 'ru', 'en' или 'other'
+        Простое определение языка
         """
-        # Считаем русские и английские символы
         ru_count = 0
         en_count = 0
         total_alpha = 0
@@ -245,20 +252,13 @@ class GeminiTranslator:
         return self.detect_language_simple(text) == 'en'
     
     def get_cache_key(self, text: str, context: str = "") -> str:
-        """Создает ключ для кэша переводов"""
+        """Создает ключ для кэша"""
         key_string = f"{text}_{self.settings['target_language']}_{context}_{self.settings['formal_tone']}"
         return hashlib.md5(key_string.encode()).hexdigest()
     
     async def call_gemini_api(self, prompt: str, context: str = "") -> Optional[str]:
         """
-        Вызов Google Gemini API
-        
-        Args:
-            prompt: Текст для обработки
-            context: Контекст перевода
-        
-        Returns:
-            str: Ответ от Gemini или None при ошибке
+        Вызов Google Gemini API с обработкой ошибок для Heroku
         """
         self.stats['api_calls'] += 1
         
@@ -280,7 +280,7 @@ class GeminiTranslator:
                 }
             ],
             "generationConfig": {
-                "temperature": 0.2,  # Низкая температура для точного перевода
+                "temperature": 0.2,
                 "topK": 1,
                 "topP": 0.95,
                 "maxOutputTokens": 2048,
@@ -306,51 +306,43 @@ class GeminiTranslator:
         }
         
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=payload, timeout=30) as response:
+            timeout = aiohttp.ClientTimeout(total=45)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, headers=headers, json=payload) as response:
                     
                     if response.status == 200:
                         data = await response.json()
                         
-                        # Извлекаем текст ответа
                         if 'candidates' in data and len(data['candidates']) > 0:
                             candidate = data['candidates'][0]
                             if 'content' in candidate and 'parts' in candidate['content']:
                                 if len(candidate['content']['parts']) > 0:
                                     translated_text = candidate['content']['parts'][0]['text']
-                                    
-                                    # Очищаем ответ от мета-информации
                                     cleaned_text = self.clean_gemini_response(translated_text)
                                     return cleaned_text
                     
                     # Обработка ошибок
                     error_text = await response.text()
-                    logger.error(f"Gemini API Error {response.status}: {error_text}")
+                    logger.error(f"Gemini API Error {response.status}: {error_text[:200]}")
                     
-                    # Если ошибка квоты, пробуем альтернативный метод
                     if response.status == 429:
+                        logger.warning("Достигнут лимит запросов, ждем...")
+                        await asyncio.sleep(10)
                         return await self.fallback_translation(prompt)
                     
                     return None
                     
         except asyncio.TimeoutError:
-            logger.error("Gemini API timeout")
-            return None
+            logger.error("Gemini API timeout, используем fallback")
+            return await self.fallback_translation(prompt)
         except Exception as e:
             logger.error(f"Gemini API exception: {e}")
             self.stats['errors'] += 1
-            return None
+            return await self.fallback_translation(prompt)
     
     def build_prompt(self, text: str, context: str = "") -> str:
         """
         Строит промпт для Gemini API
-        
-        Args:
-            text: Текст для перевода
-            context: Контекст
-            
-        Returns:
-            str: Полный промпт
         """
         tone = "формальном" if self.settings['formal_tone'] else "естественном"
         
@@ -389,27 +381,23 @@ class GeminiTranslator:
         return "\n".join(prompt_parts)
     
     def clean_gemini_response(self, text: str) -> str:
-        """Очищает ответ от Gemini от лишней информации"""
-        # Убираем кавычки если текст обернут в них
+        """Очищает ответ от Gemini"""
         if text.startswith('"') and text.endswith('"'):
             text = text[1:-1]
         
-        # Убираем начальные/конечные пробелы
         text = text.strip()
         
-        # Убираем метки перевода если есть
         text = text.replace("Перевод:", "").replace("Translation:", "").strip()
         
         return text
     
     async def fallback_translation(self, text: str) -> Optional[str]:
         """
-        Запасной метод перевода если Gemini недоступен
-        Использует простые правила или другие API
+        Запасной метод перевода
         """
         logger.info("Использую fallback перевод")
         
-        # Простой словарь для часто используемых фраз
+        # Простой словарь
         common_phrases = {
             "привет": "hello",
             "как дела": "how are you",
@@ -428,23 +416,17 @@ class GeminiTranslator:
             if ru in text_lower:
                 return en
         
-        # Если не нашли совпадений, возвращаем None
-        return None
+        return "Sorry, translation service is temporarily unavailable."
     
     async def handle_translation(self, event, original_text: str):
         """
         Обрабатывает автоматический перевод сообщения
-        
-        Args:
-            event: Событие Telegram
-            original_text: Оригинальный текст
         """
         try:
-            # Получаем контекст из истории если включено
+            # Получаем контекст
             context = ""
             if self.settings['context_aware'] and event.chat_id in self.conversation_history:
-                # Берем последние 5 сообщений как контекст
-                recent_messages = self.conversation_history[event.chat_id][-5:]
+                recent_messages = self.conversation_history[event.chat_id][-3:]  # Уменьшено для Heroku
                 context = " | ".join([msg['text'] for msg in recent_messages])
             
             # Получаем перевод
@@ -463,11 +445,11 @@ class GeminiTranslator:
                 'time': datetime.now()
             })
             
-            # Ограничиваем размер истории
-            if len(self.conversation_history[event.chat_id]) > 20:
+            # Ограничиваем размер истории для Heroku
+            if len(self.conversation_history[event.chat_id]) > 10:
                 self.conversation_history[event.chat_id].pop(0)
             
-            # Форматируем и отправляем ответ
+            # Отправляем ответ
             await self.send_translation_response(event, original_text, translated)
             
             # Обновляем статистику
@@ -482,32 +464,24 @@ class GeminiTranslator:
     async def get_translation(self, text: str, context: str = "") -> Optional[str]:
         """
         Получает перевод текста с кэшированием
-        
-        Args:
-            text: Текст для перевода
-            context: Контекст
-            
-        Returns:
-            str: Переведенный текст или None
         """
-        # Проверяем длину
         if len(text) > self.settings['max_length']:
             text = text[:self.settings['max_length']] + "..."
         
-        # Проверяем кэш
         cache_key = self.get_cache_key(text, context)
         if self.settings['cache_enabled'] and cache_key in self.translation_cache:
             self.stats['cache_hits'] += 1
             return self.translation_cache[cache_key]
         
-        # Получаем перевод от Gemini
+        # Задержка для соблюдения rate limit
+        if self.stats['api_calls'] % 5 == 0 and self.stats['api_calls'] > 0:
+            await asyncio.sleep(2)
+        
         translated = await self.call_gemini_api(text, context)
         
         if translated and self.settings['cache_enabled']:
-            # Сохраняем в кэш
             self.translation_cache[cache_key] = translated
             
-            # Ограничиваем размер кэша
             if len(self.translation_cache) > self.settings['cache_size']:
                 self.translation_cache.pop(next(iter(self.translation_cache)))
         
@@ -516,14 +490,8 @@ class GeminiTranslator:
     async def send_translation_response(self, event, original_text: str, translated_text: str):
         """
         Отправляет переведенный текст в чат
-        
-        Args:
-            event: Событие Telegram
-            original_text: Оригинальный текст
-            translated_text: Переведенный текст
         """
         try:
-            # Форматируем ответ
             response_parts = []
             
             if self.settings['show_original']:
@@ -531,25 +499,21 @@ class GeminiTranslator:
             
             response_parts.append(f"🇺🇸 **Перевод:**\n{translated_text}")
             
-            # Добавляем транслитерацию если нужно
             if self.settings['show_transliteration']:
                 translit = self.transliterate_russian(original_text)
                 response_parts.append(f"🔤 **Транслит:**\n{translit}")
             
-            response_parts.append("_✨ Переведено через Google Gemini AI_")
+            response_parts.append("_✨ Google Gemini AI_")
             
             response = "\n\n".join(response_parts)
             
-            # Отправляем ответ
-            if self.settings['reply_in_thread'] and event.is_reply:
-                # В треде если это ответ
-                await event.reply(response, parse_mode='md')
-            else:
-                # Как отдельное сообщение
+            # Отправляем с обработкой ошибок
+            try:
                 await event.respond(response, parse_mode='md')
-            
-            # Можно удалить оригинальное сообщение
-            # await event.delete()
+            except Exception as e:
+                logger.warning(f"Ошибка отправки с разметкой: {e}, отправка без разметки")
+                response_plain = response.replace('**', '').replace('_', '')
+                await event.respond(response_plain)
             
         except Exception as e:
             logger.error(f"Ошибка отправки ответа: {e}")
@@ -557,12 +521,6 @@ class GeminiTranslator:
     def transliterate_russian(self, text: str) -> str:
         """
         Простая транслитерация русского текста
-        
-        Args:
-            text: Русский текст
-            
-        Returns:
-            str: Транслитерированный текст
         """
         translit_dict = {
             'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd',
@@ -572,19 +530,15 @@ class GeminiTranslator:
             'у': 'u', 'ф': 'f', 'х': 'kh', 'ц': 'ts', 'ч': 'ch',
             'ш': 'sh', 'щ': 'shch', 'ъ': '', 'ы': 'y', 'ь': '',
             'э': 'e', 'ю': 'yu', 'я': 'ya',
-            'А': 'A', 'Б': 'B', 'В': 'V', 'Г': 'G', 'Д': 'D',
-            'Е': 'E', 'Ё': 'Yo', 'Ж': 'Zh', 'З': 'Z', 'И': 'I',
-            'Й': 'Y', 'К': 'K', 'Л': 'L', 'М': 'M', 'Н': 'N',
-            'О': 'O', 'П': 'P', 'Р': 'R', 'С': 'S', 'Т': 'T',
-            'У': 'U', 'Ф': 'F', 'Х': 'Kh', 'Ц': 'Ts', 'Ч': 'Ch',
-            'Ш': 'Sh', 'Щ': 'Shch', 'Ъ': '', 'Ы': 'Y', 'Ь': '',
-            'Э': 'E', 'Ю': 'Yu', 'Я': 'Ya',
         }
         
         result = []
         for char in text:
-            if char in translit_dict:
-                result.append(translit_dict[char])
+            if char.lower() in translit_dict:
+                if char.isupper():
+                    result.append(translit_dict[char.lower()].capitalize())
+                else:
+                    result.append(translit_dict[char])
             else:
                 result.append(char)
         
@@ -613,7 +567,6 @@ class GeminiTranslator:
     async def handle_settings(self, event, args: Optional[str]):
         """Обработка команд настроек"""
         if not args:
-            # Показать текущие настройки
             settings_text = self.format_settings()
             await event.reply(settings_text, parse_mode='md')
             return
@@ -700,7 +653,8 @@ class GeminiTranslator:
             f"• Последний перевод: **{last_time}**\n"
             f"• Время работы: **{int(hours)}ч {int(minutes)}м {int(seconds)}с**\n"
             f"• Размер кэша: **{len(self.translation_cache)}/{self.settings['cache_size']}**\n"
-            f"• История чатов: **{len(self.conversation_history)}**"
+            f"• Модель: **{self.model}**\n"
+            f"• Платформа: **Heroku**"
         )
         
         await event.reply(stats_text, parse_mode='md')
@@ -708,7 +662,7 @@ class GeminiTranslator:
     async def show_help(self, event):
         """Показать справку"""
         help_text = (
-            "**🤖 Gemini Переводчик для Telegram**\n\n"
+            "**🤖 Gemini Переводчик для Telegram (Heroku)**\n\n"
             "**Основные возможности:**\n"
             "• Автоматический перевод русских сообщений на английский\n"
             "• Поддержка контекстного перевода\n"
@@ -718,89 +672,114 @@ class GeminiTranslator:
             "**Команды:**\n"
             "• Просто пишите на русском - автоматический перевод\n"
             "• `!tr [текст]` - ручной перевод\n"
-            "• `!translate [текст]` - ручной перевод (альтернатива)\n"
+            "• `!translate [текст]` - ручной перевод\n"
             "• `!transsettings` - настройки\n"
             "• `!trstats` - статистика\n"
+            "• `!trreload` - перезагрузка кэша\n"
             "• `!trhelp` - эта справка\n\n"
-            "**Настройки (через !transsettings):**\n"
-            "• `on/off` - вкл/выкл авто-перевод\n"
-            "• `lang en/ru` - целевой язык\n"
-            "• `formal on/off` - формальный тон\n"
-            "• `context on/off` - контекстный перевод\n\n"
+            "**Настройки:**\n"
+            "• `!transsettings on/off` - вкл/выкл авто-перевод\n"
+            "• `!transsettings lang en/ru` - целевой язык\n"
+            "• `!transsettings formal on/off` - формальный тон\n"
+            "• `!transsettings context on/off` - контекст\n\n"
             "**Использует:** Google Gemini Pro AI\n"
             f"**Модель:** {self.model}\n"
-            "**Разработчик:** Telegram AI Assistant"
+            "**Версия:** Heroku Optimized"
         )
         
         await event.reply(help_text, parse_mode='md')
 
 
-# ==================== КОНФИГУРАЦИЯ И ЗАПУСК ====================
+# ==================== ФУНКЦИЯ РЕГИСТРАЦИИ ДЛЯ HEROKU ====================
 
-import configparser
+def register(bot):
+    """
+    Функция регистрации модуля для Heroku
+    Эта функция обязательна для интеграции
+    """
+    try:
+        # Проверяем наличие API ключей
+        api_id = os.getenv('API_ID')
+        api_hash = os.getenv('API_HASH')
+        gemini_key = os.getenv('GEMINI_API_KEY')
+        
+        if not api_id or not api_hash:
+            logger.error("API_ID и API_HASH не установлены в переменных окружения!")
+            return False
+        
+        if not gemini_key:
+            logger.error("GEMINI_API_KEY не установлен!")
+            return False
+        
+        # Создаем клиент Telegram
+        session_name = os.getenv('SESSION_NAME', 'gemini_translator')
+        client = TelegramClient(session_name, int(api_id), api_hash)
+        
+        # Инициализируем переводчик
+        translator = GeminiTranslator(client, gemini_key)
+        
+        # Сохраняем ссылки для доступа
+        bot.client = client
+        bot.translator = translator
+        
+        logger.info("✅ Модуль Gemini Translator зарегистрирован для Heroku")
+        
+        # Запускаем клиент в фоне
+        async def start_client():
+            await client.start()
+            logger.info(f"👤 Пользователь: {await client.get_me()}")
+            await client.run_until_disconnected()
+        
+        # Запускаем в отдельной задаче
+        import threading
+        client_thread = threading.Thread(target=lambda: asyncio.run(start_client()), daemon=True)
+        client_thread.start()
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка регистрации модуля: {e}")
+        return False
 
-def load_config(config_file: str = 'config.ini') -> dict:
-    """Загрузка конфигурации из файла"""
-    config = configparser.ConfigParser()
-    
-    if os.path.exists(config_file):
-        config.read(config_file)
-    else:
-        # Создаем дефолтный конфиг
-        config['telegram'] = {
-            'api_id': 'ВАШ_API_ID',
-            'api_hash': 'ВАШ_API_HASH',
-            'session_name': 'gemini_translator'
-        }
-        config['gemini'] = {
-            'api_key': 'ВАШ_GEMINI_API_KEY'
-        }
-        
-        with open(config_file, 'w') as f:
-            config.write(f)
-        
-        print(f"⚠️ Создан конфиг файл: {config_file}")
-        print("⚠️ Заполните его перед запуском!")
-    
-    return config
+
+# ==================== АЛЬТЕРНАТИВНЫЙ ЗАПУСК ====================
 
 async def main():
-    """Основная функция запуска"""
-    print("🚀 Запуск Gemini Translator для Telegram...")
+    """Основная функция запуска для самостоятельного использования"""
+    print("🚀 Запуск Gemini Translator...")
     
-    # Загружаем конфигурацию
-    config = load_config()
+    # Используем переменные окружения
+    api_id = os.getenv('API_ID')
+    api_hash = os.getenv('API_HASH')
+    gemini_api_key = os.getenv('GEMINI_API_KEY')
     
-    # Получаем учетные данные
-    api_id = int(config['telegram']['api_id'])
-    api_hash = config['telegram']['api_hash']
-    session_name = config['telegram']['session_name']
-    gemini_api_key = config['gemini']['api_key']
-    
-    # Проверяем учетные данные
-    if api_id == 'ВАШ_API_ID' or api_hash == 'ВАШ_API_HASH':
-        print("❌ Заполните config.ini файл своими данными!")
+    if not api_id or not api_hash:
+        print("❌ Установите API_ID и API_HASH в переменных окружения!")
         return
     
-    # Создаем клиент Telegram
-    client = TelegramClient(session_name, api_id, api_hash)
+    # Создаем клиент
+    session_name = os.getenv('SESSION_NAME', 'gemini_translator')
+    client = TelegramClient(session_name, int(api_id), api_hash)
     
     # Инициализируем переводчик
     translator = GeminiTranslator(client, gemini_api_key)
     
-    # Запускаем клиент
+    # Запускаем
     await client.start()
     
     print(f"✅ Gemini Translator запущен!")
     print(f"👤 Пользователь: {await client.get_me()}")
     print(f"🤖 Модель AI: {translator.model}")
-    print(f"📊 Статистика доступна по команде: !trstats")
+    print(f"📊 Статистика: !trstats")
     print(f"🆘 Помощь: !trhelp")
-    print("\nТеперь пишите сообщения на русском - они автоматически переведутся!")
     
-    # Запускаем бесконечный цикл
     await client.run_until_disconnected()
 
 if __name__ == '__main__':
-    # Запуск асинхронного приложения
-    asyncio.run(main())
+    # Определяем режим запуска
+    if 'HEROKU' in os.environ or 'DYNO' in os.environ:
+        print("🌐 Запуск в режиме Heroku")
+        # В Heroku модуль будет загружен через register()
+    else:
+        # Локальный запуск
+        asyncio.run(main())
