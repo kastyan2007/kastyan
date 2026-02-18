@@ -239,11 +239,12 @@ def create_game_keyboard(game_id):
     
     return InlineKeyboardMarkup(buttons)
 
-# Основная функция регистрации для HeroKu
-def register(app: Client):
+# Функция регистрации для HeroKu
+def register():
     print("✅ Модуль шахмат загружен!")
     
-    @app.on_message(filters.command("chess") & filters.private)
+    # HeroKu ожидает, что функция вернет список хендлеров
+    @Client.on_message(filters.command("chess") & filters.private)
     async def chess_command(client, message):
         user_id = message.from_user.id
         
@@ -258,8 +259,8 @@ def register(app: Client):
             "Выберите режим игры:",
             reply_markup=keyboard
         )
-
-    @app.on_callback_query(filters.regex("^chess_vs_friend$"))
+    
+    @Client.on_callback_query(filters.regex("^chess_vs_friend$"))
     async def chess_vs_friend(client, callback_query):
         user_id = callback_query.from_user.id
         
@@ -272,8 +273,8 @@ def register(app: Client):
             f"`/join_chess {user_id}`\n\n"
             "Ожидание присоединения второго игрока..."
         )
-
-    @app.on_message(filters.command("join_chess") & filters.private)
+    
+    @Client.on_message(filters.command("join_chess") & filters.private)
     async def join_chess(client, message):
         try:
             creator_id = int(message.command[1])
@@ -315,8 +316,8 @@ def register(app: Client):
                 InlineKeyboardButton("♟ Показать доску", callback_data=f"chess_show_{creator_id}")
             ]])
         )
-
-    @app.on_callback_query(filters.regex("^chess_vs_bot$"))
+    
+    @Client.on_callback_query(filters.regex("^chess_vs_bot$"))
     async def chess_vs_bot(client, callback_query):
         user_id = callback_query.from_user.id
         
@@ -332,8 +333,8 @@ def register(app: Client):
             f"```\n{board_text}\n```",
             reply_markup=keyboard
         )
-
-    @app.on_callback_query(filters.regex("^chess_move_"))
+    
+    @Client.on_callback_query(filters.regex("^chess_move_"))
     async def chess_move(client, callback_query):
         data = callback_query.data.split("_")
         game_id = int(data[2])
@@ -413,7 +414,7 @@ def register(app: Client):
                 await callback_query.answer(f"❌ {message_text}")
                 game.selected_piece = None
                 game.valid_moves = []
-
+    
     async def make_bot_move(client, game_id, message):
         if game_id not in active_games:
             return
@@ -454,8 +455,8 @@ def register(app: Client):
                     f"```\n{board_text}\n```",
                     reply_markup=keyboard
                 )
-
-    @app.on_callback_query(filters.regex("^chess_refresh_"))
+    
+    @Client.on_callback_query(filters.regex("^chess_refresh_"))
     async def chess_refresh(client, callback_query):
         game_id = int(callback_query.data.split("_")[2])
         
@@ -478,8 +479,8 @@ def register(app: Client):
             f"```\n{board_text}\n```",
             reply_markup=keyboard
         )
-
-    @app.on_callback_query(filters.regex("^chess_forfeit_"))
+    
+    @Client.on_callback_query(filters.regex("^chess_forfeit_"))
     async def chess_forfeit(client, callback_query):
         game_id = int(callback_query.data.split("_")[2])
         user_id = callback_query.from_user.id
@@ -511,8 +512,8 @@ def register(app: Client):
         )
         
         del active_games[game_id]
-
-    @app.on_callback_query(filters.regex("^chess_new$"))
+    
+    @Client.on_callback_query(filters.regex("^chess_new$"))
     async def chess_new(client, callback_query):
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🤖 Играть с ботом", callback_data="chess_vs_bot")],
@@ -525,12 +526,12 @@ def register(app: Client):
             "Выберите режим игры:",
             reply_markup=keyboard
         )
-
-    @app.on_callback_query(filters.regex("^chess_cancel$"))
+    
+    @Client.on_callback_query(filters.regex("^chess_cancel$"))
     async def chess_cancel(client, callback_query):
         await callback_query.message.edit_text("❌ Игра отменена")
-
-    @app.on_callback_query(filters.regex("^chess_show_"))
+    
+    @Client.on_callback_query(filters.regex("^chess_show_"))
     async def chess_show(client, callback_query):
         game_id = int(callback_query.data.split("_")[2])
         
@@ -552,9 +553,17 @@ def register(app: Client):
             f"```\n{board_text}\n```",
             reply_markup=create_game_keyboard(game_id)
         )
-
-    # Возвращаем список команд для автозаполнения
+    
+    # HeroKu ожидает, что функция вернет список хендлеров
     return [
-        {"command": "chess", "description": "♟ Начать игру в шахматы"},
-        {"command": "join_chess", "description": "Присоединиться к игре в шахматы"}
+        chess_command,
+        chess_vs_friend,
+        join_chess,
+        chess_vs_bot,
+        chess_move,
+        chess_refresh,
+        chess_forfeit,
+        chess_new,
+        chess_cancel,
+        chess_show
     ]
